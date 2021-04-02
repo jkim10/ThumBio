@@ -9,22 +9,17 @@ from PIL import Image
 from scenedetect.detectors import ContentDetector
 
 if(len(sys.argv) < 2):
-    print(f"Usage: {sys.argv[0]} <Video File> <Performance Level (Empty: Slow 1: Fast 2: Faster 3: Fastest)> <Background Subtraction>")
+    print(f"Usage: {sys.argv[0]} <Video File> <Performance Level (Empty: Slow 1: Fast 2: Faster 3: Fastest)>")
     quit()
 
 file_name = sys.argv[1]
 performance = 0
-background_subtraction = False
 if(len(sys.argv) >= 3):
     performance = int(sys.argv[2])
-if(len(sys.argv) == 4):
-    background_subtraction = True
 
 color_weight = 0.85
 motion_weight = 0.15
 audio_weight = 0.0
-def remove_background(img):
-    return img
 
 def find_scenes(video_path, threshold=30.0):
     # Create our video & scene managers, then add the detector.
@@ -81,8 +76,6 @@ for index,scene in enumerate(tqdm(scene_tuples)):
         ret, frame1 = cap.read()
         if(performance == 3):
             frame1 = cv2.resize(frame1, (0,0), fx=0.5, fy=0.5)
-        if(background_subtraction):
-            frame1 = remove_background(frame1)
         color_counts = image_colorfulness(frame1)
         scenes[index]['color'].append(color_counts) 
         prvs = cv2.cvtColor(frame1,cv2.COLOR_BGR2GRAY)
@@ -95,9 +88,6 @@ for index,scene in enumerate(tqdm(scene_tuples)):
                 break
             if(performance > 2):
                 frame2 = cv2.resize(frame2, (0,0), fx=0.5, fy=0.5)
-            if(background_subtraction):
-                frame2 = remove_background(frame2)
-                cv2.imwrite("TEST.png",frame2)
             # Color Analysis
             color_counts = image_colorfulness(frame2)
             scenes[index]['color'].append(color_counts)
@@ -156,10 +146,7 @@ lap_values = []
 color_values = []
 while(int(cap.get(cv2.CAP_PROP_POS_FRAMES)) != int(end_frame)):
     ret, frame = cap.read()
-    if(background_subtraction):
-        color_value = image_colorfulness(remove_background(frame))
-    else:
-        color_value = image_colorfulness(frame)
+    color_value = image_colorfulness(frame)
     gray = cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
     lap = cv2.Laplacian(gray, cv2.CV_64F).var()
     lap_values.append(lap)
