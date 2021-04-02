@@ -39,32 +39,21 @@ def find_scenes(video_path, threshold=30.0):
     return scene_manager.get_scene_list()
 
 def image_colorfulness(image):
-	# split the image into its respective RGB components
 	(B, G, R) = cv2.split(image.astype("float"))
-	# compute rg = R - G
 	rg = np.absolute(R - G)
-	# compute yb = 0.5 * (R + G) - B
 	yb = np.absolute(0.5 * (R + G) - B)
-	# compute the mean and standard deviation of both `rg` and `yb`
 	(rbMean, rbStd) = (np.mean(rg), np.std(rg))
 	(ybMean, ybStd) = (np.mean(yb), np.std(yb))
-	# combine the mean and standard deviations
 	stdRoot = np.sqrt((rbStd ** 2) + (ybStd ** 2))
 	meanRoot = np.sqrt((rbMean ** 2) + (ybMean ** 2))
-	# derive the "colorfulness" metric and return it
 	return stdRoot + (0.3 * meanRoot)
+def analyze_motion(frame,prvs):
+    next = cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
+    flow = cv2.calcOpticalFlowFarneback(prvs,next, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+    mag, ang = cv2.cartToPolar(flow[...,0], flow[...,1])
+    return next, mag
 
 cap = cv2.VideoCapture(file_name)
-# Default Params
-feature_params = dict( maxCorners = 100,
-                       qualityLevel = 0.3,
-                       minDistance = 7,
-                       blockSize = 7 )
-lk_params = dict( winSize  = (15,15),
-                  maxLevel = 2,
-                  criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
-
-color = np.random.randint(0,255,(100,3))
 
 
 scene_tuples = find_scenes(file_name)
@@ -95,17 +84,13 @@ for index,scene in enumerate(tqdm(scene_tuples)):
             # Motion Analysis
             if (performance > 1):
                 if((f%3)==0):
-                    next = cv2.cvtColor(frame2,cv2.COLOR_BGR2GRAY)
-                    flow = cv2.calcOpticalFlowFarneback(prvs,next, None, 0.5, 3, 15, 3, 5, 1.2, 0)
-                    mag, ang = cv2.cartToPolar(flow[...,0], flow[...,1])
+                    prvs, mag = analyze_motion(frame2,prvs)
                     scenes[index]['motion'].append(np.median(mag))
                     prvs = next
             else:
-                next = cv2.cvtColor(frame2,cv2.COLOR_BGR2GRAY)
-                flow = cv2.calcOpticalFlowFarneback(prvs,next, None, 0.5, 3, 15, 3, 5, 1.2, 0)
-                mag, ang = cv2.cartToPolar(flow[...,0], flow[...,1])
+                prvs, mag = analyze_motion(frame2,prvs)
                 scenes[index]['motion'].append(np.median(mag))
-                prvs = next
+
     except Exception as e:
         print(f"Skipping frame {index}: {e}")
 
