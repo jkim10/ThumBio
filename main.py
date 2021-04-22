@@ -1,206 +1,100 @@
-import cv2
-import numpy as np
-from pydub import AudioSegment
-
-from scenedetect import VideoManager
-from scenedetect import SceneManager
-from scenedetect.detectors import ContentDetector
-from PIL import Image
+from fastapi import BackgroundTasks, FastAPI, File, UploadFile, Form
+from fastapi.responses import HTMLResponse,RedirectResponse
+from typing import List
 import tempfile
 import os
-performance = 3
+import io
+import cv2
+from starlette.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from analysis2 import analyze
+import threading
+app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"], # Allows all methods
+    allow_headers=["*"], # Allows all headers
+    )
+def generate_html_response():
+    html_content = """
+    <html>
+        <head>
+            <title>Some HTML in here</title>
+        </head>
+        <body>
+            <h1>Look ma! HTML!</h1>
+        </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content, status_code=200)
 
 
-def analyze(file_name,color_weight=.7, motion_weight=.2, audio_weight=.1):
-    # DFT Blur detection
-    saturation_weight = color_weight/2
-    color_weight = color_weight/2
-    print(f"Analyzing {file_name} with weights: {color_weight}, {saturation_weight},{motion_weight}, {audio_weight}")
-    def detect_blur(image):
-        size = 60
-        (h,w) = image.shape
-        (cX, cY) = (int(w / 2.0) , int(h / 2.0))
-        fft = np.fft.fft2(image)
-        fftShift = np.fft.fftshift(fft)
-        fftShift[(cY - size):(cY + size), cX - size:cX + size] = 0
-        fftShift = np.fft.ifftshift(fftShift)
-        recon = np.fft.ifft2(fftShift)
-        magnitude = 20 * np.log(np.abs(recon))
-        mean = np.mean(magnitude)
-        return (mean)
-        
-    # Min Max Normalization on Numpy Array
-    def normalize(arr):
-        return (arr - arr.min())/ (arr.max() - arr.min())
-
-    # Find Scene Boundaries
-    def find_scenes(video_path, threshold=30.0):
-        # Create our video & scene managers, then add the detector.
-        video_manager = VideoManager([video_path])
-        scene_manager = SceneManager()
-        scene_manager.add_detector(
-            ContentDetector(threshold=threshold))
-
-        # Improve processing speed by downscaling before processing.
-        video_manager.set_downscale_factor()
-
-        # Start the video manager and perform the scene detection.
-        video_manager.start()
-        scene_manager.detect_scenes(frame_source=video_manager,show_progress=False)
-
-        # Each returned scene is a tuple of the (start, end) timecode.
-        return scene_manager.get_scene_list()
+outputs = {}
 
 
-    # Hasler and Suesstrunk
-    def image_colorfulness(image):
-        (B, G, R) = cv2.split(image.astype("float"))
-        rg = np.absolute(R - G)
-        yb = np.absolute(0.5 * (R + G) - B)
-        (rbMean, rbStd) = (np.mean(rg), np.std(rg))
-        (ybMean, ybStd) = (np.mean(yb), np.std(yb))
-        stdRoot = np.sqrt((rbStd ** 2) + (ybStd ** 2))
-        meanRoot = np.sqrt((rbMean ** 2) + (ybMean ** 2))
-        return stdRoot + (0.3 * meanRoot)
+def process(file_name,weights=[]):
+    if(len(weights) > 2):
+        bytes = analyze(file_name,color_weight=weights[0],motion_weight=weights[1],audio_weight=weights[2])
+    else:
+        bytes = analyze(file_name)
+    outputs[file_name] = bytes
 
-    def save_frame(frame):
-        cap = cv2.VideoCapture(file_name)
-        cap.set(cv2.CAP_PROP_POS_FRAMES,int(frame))
-        ret,frame = cap.read()
-        cv2.imwrite("debug.jpg",frame)
-    # Optical Flow Calculation
-    def analyze_motion(frame,prvs):
-        next = cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
-        flow = cv2.calcOpticalFlowFarneback(prvs,next, None, 0.5, 3, 15, 3, 5, 1.2, 0)
-        mag, ang = cv2.cartToPolar(flow[...,0], flow[...,1])
-        return next, mag
+def write_notification(email: str, message=""):
+    with open("log.txt", mode="w") as email_file:
+        content = f"notification for {email}: {message}"
+        email_file.write(content)
 
-    def find_most_rep(frameTuple):
-        start_frame = frameTuple[0]
-        end_frame = frameTuple[1]
-        color_values = []
-        dft_values = []
-        sat_values = []
-        cap = cv2.VideoCapture(file_name)
-        cap.set(cv2.CAP_PROP_POS_FRAMES,int(start_frame))
-        while(int(cap.get(cv2.CAP_PROP_POS_FRAMES)) != int(end_frame)):
-            ret, frame = cap.read()
-            color_value = image_colorfulness(frame)
-            gray = cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
-            mean = detect_blur(gray)
-            color_values.append(color_value)
-            dft_values.append(mean)
-            img_hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-            saturation = img_hsv[:, :, 1].mean()
-            sat_values.append(saturation)
+@app.get("/tmp/{file_name}")
+def get_status(file_name: str):
+    print(outputs.keys())
+    if('/tmp/'+file_name in outputs.keys()):
+        res, im_png = cv2.imencode(".png",outputs['/tmp/'+file_name])
+        del outputs['/tmp/'+file_name]
+        return StreamingResponse(io.BytesIO(im_png.tobytes()), media_type="image/png")
+    else:
+        return {'message': "not_found"}
 
+@app.post("/send-notification/{email}")
+async def send_notification(email: str, background_tasks: BackgroundTasks):
+    background_tasks.add_task(write_notification, email, message="some notification")
+    return {"message": "Notification sent in the background"}
 
-        color_values = np.array(color_values)
-        dft_values = np.array(dft_values)
-        norm_saturation_values = normalize(np.array(sat_values))
-        norm_color_values = normalize(color_values)
-        norm_dft_values = normalize(dft_values)
-        final_scene_scores = (.2 * norm_color_values) + (5 * norm_dft_values) + (.3*norm_saturation_values)
-        best_frame = int(start_frame) + np.argmax(final_scene_scores)
-        return best_frame
+@app.post("/uploadfiles/")
+async def create_upload_files(background_tasks: BackgroundTasks, parameters: str=Form(...),file: UploadFile = File(...)):
+    weights = [float(x)/10 for x in parameters]
+    print(weights)
+    tmp, file_name = tempfile.mkstemp()
+    contents = await file.read()
+    os.write(tmp,contents)
+    os.close(tmp)
+    background_tasks.add_task(process,file_name,weights)
+    content = """
+            <body>
+            <form action="/uploadfiles/" enctype="multipart/form-data" method="post">
+            <input name="files" type="file" multiple>
+            <input type="submit">
+            </form>
+            </body>
+                """
+    return {'file_name': file_name}
 
-    cap = cv2.VideoCapture(file_name)
-    sound = AudioSegment.from_file(file_name)
-    scene_tuples = find_scenes(file_name)
+@app.get("/")
+async def main():
+    content = """
+            <body>
+            <form action="/uploadfiles/" enctype="multipart/form-data" method="post">
+            <input name="files" type="file" multiple>
+            <input type="submit">
+            </form>
+            </body>
+                """
+    return HTMLResponse(content=content)
 
-    def save_scene(scene_num):
-        save_frame(find_most_rep(scene_tuples[scene_num]))
-
-    scenes = {}
-    prvs = None
-    for index,scene in enumerate(scene_tuples):
-        try:
-            scenes[index] = {'color': [], 'sat': [],'motion': [], 'audio': 0}
-
-            ret, frame1 = cap.read()
-            if(performance == 3):
-                frame1 = cv2.resize(frame1, (0,0), fx=0.5, fy=0.5)
-            color_counts = image_colorfulness(frame1)
-            scenes[index]['color'].append(color_counts) 
-            prvs = cv2.cvtColor(frame1,cv2.COLOR_BGR2GRAY)
-            hsv = np.zeros_like(frame1)
-            hsv[...,1] = 255
-            
-            for f in range(int(scene[0])+1,int(scene[1])+1):
-                flag, frame2 = cap.read()
-                if not flag:
-                    break
-                if(performance >= 2):
-                    frame2 = cv2.resize(frame2, (0,0), fx=0.5, fy=0.5)
-                # Color Analysis
-                color_counts = image_colorfulness(frame2)
-                img_hsv = cv2.cvtColor(frame2, cv2.COLOR_BGR2HSV)
-                saturation = img_hsv[:, :, 1].mean()
-                scenes[index]['color'].append(color_counts)
-                scenes[index]['sat'].append(saturation)
-                # Motion Analysis
-                if (performance >= 1):
-                    if((f%3)==0):
-                        prvs, mag = analyze_motion(frame2,prvs)
-                        scenes[index]['motion'].append(np.mean(mag))
-                        # gray = cv2.cvtColor(frame2,cv2.COLOR_BGR2GRAY)
-                        # scenes[index]['motion'].append(detect_blur(gray))
-
-                else:
-                    prvs, mag = analyze_motion(frame2,prvs)
-                    scenes[index]['motion'].append(np.mean(mag))
-            start_ms = scene[0].get_seconds()*1000
-            end_ms = scene[1].get_seconds()*1000
-            s_segment = sound[start_ms:end_ms]
-
-            loudness = s_segment.dBFS
-            scenes[index]['audio'] = loudness
-        except Exception as e:
-            print(f"Skipping frame {index}: {e}")
-
-    # Calculate Most
-    color_stats = []
-    saturation_stats = []
-    motion_stats = []
-    audio_stats = []
-
-    for scene in scenes.keys():
-        if(len(np.array(scenes[scene]['color'])) == 0):
-            color_stats.append(0.0)
-        else:
-            color_stats.append(np.nan_to_num(np.array(scenes[scene]['color']),posinf=0, neginf=0).mean())
-        if(len(np.array(scenes[scene]['motion'])) == 0):
-            motion_stats.append(0.0)
-        else:
-            motion_stats.append(np.nan_to_num(np.array(scenes[scene]['motion']),posinf=0, neginf=0).mean())
-        if(len(np.array(scenes[scene]['sat'])) == 0):
-            saturation_stats.append(0.0)
-        else:
-            saturation_stats.append(np.nan_to_num(np.array(scenes[scene]['sat']),posinf=0, neginf=0).mean())
-        audio_stats.append(scenes[scene]['audio'])
-
-
-    color_stats = np.array(color_stats)
-    saturation_stats = np.array(saturation_stats)
-    motion_stats = np.array(motion_stats)
-    audio_stats = np.array(audio_stats)
-
-    norm_color_stats = normalize(color_stats)
-    norm_motion_stats = normalize(motion_stats)
-    norm_saturation_stats = normalize(saturation_stats)
-    norm_audio_stats = normalize(audio_stats)
-    final_scores = (color_weight * norm_color_stats) - (motion_weight * norm_motion_stats) + (saturation_weight * norm_saturation_stats) + (audio_weight * norm_audio_stats)
-
-
-    chosen = np.argmax(final_scores)
-
-    # Start Finding the Most Representative Frame in the chosen
+@app.get("/get_status")
+def status():
+    return state.get_state()
 
 
 
-
-
-    best_frame = find_most_rep(scene_tuples[chosen])
-    cap.set(cv2.CAP_PROP_POS_FRAMES,int(best_frame))
-    ret,frame = cap.read()
-    return frame
